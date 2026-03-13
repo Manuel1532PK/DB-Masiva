@@ -2,14 +2,13 @@ from flask import Flask, render_template_string, request, redirect, url_for
 import redis
 import uuid
 import datetime
-import json
 
 app = Flask(__name__)
 
-# Conexión a Redis (ajusta host si es necesario)
+# Conexión a Redis
 db = redis.Redis(host='localhost', port=6379, decode_responses=True)
 
-TTL_SESION = 1800  # 30 segundos para pruebas (cambiar a 1800 para 30 minutos)
+TTL_SESION = 1800  # 30 minutos (cambiar a 1800 para producción)
 
 # Plantilla HTML principal (índice)
 HTML_INDEX = '''
@@ -73,7 +72,8 @@ HTML_INDEX = '''
 </body>
 </html>
 '''
-# Plantilla para detalle de una sesión (con opciones de actualizar y eliminar)
+
+# Plantilla para detalle de una sesión
 HTML_DETALLE = '''
 <!DOCTYPE html>
 <html>
@@ -92,7 +92,6 @@ HTML_DETALLE = '''
         <p><strong>Usuario:</strong> {{ sesion.username }}</p>
         <p><strong>Email:</strong> {{ sesion.email }}</p>
         <p><strong>Último Acceso:</strong> {{ sesion.ultimo_acceso }}</p>
-        <p><strong>Datos Extra:</strong> {{ sesion.datos_extra }}</p>
         <p><strong>TTL restante:</strong> {{ ttl }} segundos</p>
     </div>
     
@@ -102,8 +101,6 @@ HTML_DETALLE = '''
         <input type="text" name="username" value="{{ sesion.username }}"><br>
         <label>Nuevo email:</label><br>
         <input type="email" name="email" value="{{ sesion.email }}"><br>
-        <label>Datos extra (JSON):</label><br>
-        <textarea name="datos_extra" rows="4" cols="50">{{ sesion.datos_extra }}</textarea><br>
         <button type="submit">Actualizar</button>
     </form>
     
@@ -121,26 +118,14 @@ def generar_id_sesion():
     return str(uuid.uuid4())
 
 def obtener_sesiones_activas():
-    #Devuelve una lista de diccionarios con datos de todas las sesiones activas.
-    # Obtenemos todas las claves que coinciden con 'session:*'
     claves = db.keys('session:*')
     sesiones = []
     for clave in claves:
         session_id = clave.split(':')[1]
-        # Verificamos si existe (por si acaso)
         if db.exists(clave):
             datos = db.hgetall(clave)
-            # Calcular si está activa (TTL > 0) - Redis retorna -1 si no tiene expiración, -2 si no existe
             ttl = db.ttl(clave)
             activa = ttl > 0
-            # Convertir datos_extra de JSON string a dict para mostrarlo bonito, pero en el listado lo dejamos como string
-            if 'datos_extra' in datos:
-                try:
-                    # Para mostrarlo en el listado, podemos mantenerlo como string, pero si queremos verlo formateado
-                    # Lo dejamos así, en el detalle lo parsearemos.
-                    pass
-                except:
-                    pass
             sesiones.append({
                 'id': session_id,
                 'username': datos.get('username', ''),
@@ -165,16 +150,12 @@ def crear_sesion():
     session_id = generar_id_sesion()
     clave_sesion = f"session:{session_id}"
     
-    # Guardar en hash
     db.hset(clave_sesion, mapping={
         'user_id': session_id[:8],
         'username': username,
         'email': email,
-        'ultimo_acceso': datetime.datetime.now().isoformat(),
-        'datos_extra': json.dumps({'creacion': datetime.datetime.now().isoformat()})
+        'ultimo_acceso': datetime.datetime.now().isoformat()
     })
-    # Añadir a conjunto de sesiones activas (opcional, no lo estamos usando en el listado)
-    db.sadd('active_sessions', session_id)
     db.expire(clave_sesion, TTL_SESION)
     
     return redirect('/')
@@ -185,19 +166,8 @@ def detalle_sesion(session_id):
     if not db.exists(clave_sesion):
         return "Sesión no encontrada o expirada", 404
     
-    # Renovar TTL al consultar detalle (simula actividad)
     db.expire(clave_sesion, TTL_SESION)
-    
     datos = db.hgetall(clave_sesion)
-    # Parsear datos_extra para mostrarlo como JSON formateado
-    if 'datos_extra' in datos:
-        try:
-            datos_extra = json.loads(datos['datos_extra'])
-            # Convertir a string bonito para mostrarlo en el HTML
-            datos['datos_extra'] = json.dumps(datos_extra, indent=2)
-        except:
-            pass
-    
     ttl = db.ttl(clave_sesion)
     return render_template_string(HTML_DETALLE, sesion={'id': session_id, **datos}, ttl=ttl)
 
@@ -209,26 +179,13 @@ def actualizar_sesion(session_id):
     
     username = request.form.get('username')
     email = request.form.get('email')
-    datos_extra_raw = request.form.get('datos_extra')
     
-    # Actualizar campos si se proporcionaron
     if username:
         db.hset(clave_sesion, 'username', username)
     if email:
         db.hset(clave_sesion, 'email', email)
-    if datos_extra_raw:
-        # Intentar parsear para validar que sea JSON, si no, se guarda como string simple
-        try:
-            # Si es un JSON válido, lo cargamos y lo guardamos como string JSON
-            json.loads(datos_extra_raw)
-            db.hset(clave_sesion, 'datos_extra', datos_extra_raw)
-        except:
-            # Si no es JSON válido, lo guardamos como un string con clave "valor"
-            db.hset(clave_sesion, 'datos_extra', json.dumps({'valor': datos_extra_raw}))
     
-    # Actualizar último acceso
     db.hset(clave_sesion, 'ultimo_acceso', datetime.datetime.now().isoformat())
-    # Renovar TTL
     db.expire(clave_sesion, TTL_SESION)
     
     return redirect(url_for('detalle_sesion', session_id=session_id))
@@ -237,7 +194,6 @@ def actualizar_sesion(session_id):
 def eliminar_sesion(session_id):
     clave_sesion = f"session:{session_id}"
     db.delete(clave_sesion)
-    db.srem('active_sessions', session_id)
     return redirect('/')
 
 app.run(debug=True)
